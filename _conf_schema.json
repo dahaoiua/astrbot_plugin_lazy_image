@@ -7,9 +7,9 @@
   },
   "keep_current_image": {
     "description": "当前消息的图直接带给模型",
-    "hint": "开：这一轮模型能直接看到刚发的图（约 45KB / 500 token）；关：只给 [图#12]，模型要看再调工具",
+    "hint": "开：用户刚发的图直接带给聊天模型（deepseek-flash 支持视觉，模型能真看到）；关：只给 [图#N]，模型要看就调 view_image",
     "type": "bool",
-    "default": false
+    "default": true
   },
   "vision_provider": {
     "description": "看图用的视觉模型",
