@@ -1,0 +1,13 @@
+name: astrbot_plugin_lazy_image
+display_name: 图片懒加载
+desc: 图片不再塞进上下文：落盘编号，只留 [图#12]，LLM 需要时调 view_image 取一张
+help: |
+  用户在群里发的图会存到本地并编号，上下文里只留 [图#12]，不再每轮重发 base64。
+  模型需要看清内容时自己调 view_image(12)，插件把那一张缩到 512 再发给它。
+  /img_list    看本会话存了哪些图
+  /img_show 12 把 #12 重新发出来
+  /img_clean   清理过期的图
+version: v1.0.0
+author: dahaoiua
+repo: https://github.com/dahaoiua/astrbot_plugin_lazy_image
+astrbot_version: ">=4.20.0"

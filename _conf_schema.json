@@ -1,0 +1,92 @@
+{
+  "enabled": {
+    "description": "启用图片懒加载",
+    "hint": "开：图片落盘编号，上下文只留 [图#12]，模型需要时调 view_image；关：恢复 AstrBot 默认行为",
+    "type": "bool",
+    "default": true
+  },
+  "keep_current_image": {
+    "description": "当前消息的图直接带给模型",
+    "hint": "开：这一轮模型能直接看到刚发的图（约 45KB / 500 token）；关：只给 [图#12]，模型要看再调工具",
+    "type": "bool",
+    "default": false
+  },
+  "vision_provider": {
+    "description": "看图用的视觉模型",
+    "hint": "留空=provider_settings 里的 default_image_caption_provider_id（现为 deepseek/deepseek-flash）",
+    "type": "string",
+    "default": ""
+  },
+  "vision_max_side": {
+    "description": "传给视觉模型的图片长边",
+    "hint": "768 足够看清文字和细节；太小会认错字",
+    "type": "int",
+    "default": 768
+  },
+  "vision_prompt": {
+    "description": "看图时给视觉模型的指令",
+    "hint": "留空用内置的那段（主体/场景/文字/配色/构图）",
+    "type": "text",
+    "default": ""
+  },
+  "cache_caption": {
+    "description": "缓存看图结果",
+    "hint": "第一次看完把描述存进索引，下次同样问题直接返回，省一次模型调用",
+    "type": "bool",
+    "default": true
+  },
+  "llm_max_side": {
+    "description": "给模型看的图片长边",
+    "hint": "缩到这个尺寸再送给 LLM，512 足够辨认内容，1024 更清楚但 token/流量翻好几倍",
+    "type": "int",
+    "default": 512
+  },
+  "max_images_per_request": {
+    "description": "单次请求最多注入几张图",
+    "hint": "模型一次申请多张时按这个上限截断，避免又回到多图上传",
+    "type": "int",
+    "default": 2
+  },
+  "max_images_per_message": {
+    "description": "一条消息最多处理几张图",
+    "hint": "表情包连发时防止一次存太多",
+    "type": "int",
+    "default": 3
+  },
+  "retention_days": {
+    "description": "图片保留天数",
+    "hint": "超过这个天数的图会被删掉（0 = 不删）；插件启动和 /img_clean 时清理",
+    "type": "int",
+    "default": 7
+  },
+  "inject_hint": {
+    "description": "注入可用图片列表",
+    "hint": "在系统提示里加一行「最近可用编号 #12、#13」，模型才知道有哪些图能申请",
+    "type": "bool",
+    "default": true
+  },
+  "hint_items": {
+    "description": "提示里列几个编号",
+    "hint": "太多会占上下文，5 个够用",
+    "type": "int",
+    "default": 5
+  },
+  "allowed_sessions": {
+    "description": "只在哪些会话生效",
+    "hint": "留空=全部；填会话名片段，逗号分隔",
+    "type": "string",
+    "default": ""
+  },
+  "blocked_sessions": {
+    "description": "哪些会话不生效",
+    "hint": "填会话名片段，逗号分隔",
+    "type": "string",
+    "default": ""
+  },
+  "capture_hint_seconds": {
+    "description": "先发图再提问时，多久内的图自动补编号",
+    "hint": "图落盘后这么多秒内，如果下一条消息没带图，就自动把 [图#N] 补进消息",
+    "type": "int",
+    "default": 180
+  }
+}

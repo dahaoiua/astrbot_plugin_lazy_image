@@ -1,0 +1,63 @@
+# astrbot_plugin_lazy_image
+
+图片懒加载：聊天里的图片不再塞进上下文，而是落盘编号，上下文只留 `[图#N]`；需要知道图里是什么时，模型调 `view_image(N)`，由视觉模型看图并返回文字。
+
+## 解决的问题
+
+AstrBot 默认会把图片以 base64 放进上下文，**每轮请求都重发一遍**。一张 768×1024 的图约 160KB base64、上千 vision token，十张图就是 1.6MB + 上万 token；服务器上行只有 3 Mbps 时，光传输就要几十秒。
+
+这个插件把图挪到磁盘：
+
+| | 默认行为 | 用本插件后 |
+| --- | --- | --- |
+| 普通聊天（历史 10 张图） | 1.6MB 上传 + 1.5 万 token | ~0 + 纯文本 |
+| 发图问一句 | 同上 | 0（模型只看到 `[图#N]`） |
+| 需要知道图里内容 | 已经在上下文里了 | 一次 `view_image`（视觉模型调用，结果缓存） |
+
+## 工作方式
+
+```
+用户发图（不管有没有 @ 机器人）
+  → 插件落盘 plugin_data/astrbot_plugin_lazy_image/<会话>/12.png
+  → 上下文里的图片块换成 [图片]，消息末尾补 "[图#12]"
+
+模型需要知道图里是什么
+  → 调 view_image(12)（可带 question）
+  → 插件把图缩到 768 长边，交给视觉模型（默认 deepseek/deepseek-flash）
+  → 视觉模型返回文字描述，结果缓存进索引，重复问不再调模型
+```
+
+为什么要绕一层视觉模型：聊天模型本身不一定支持图片输入（本机 9B 实测直接断连），
+所以「把图注入给聊天模型」这条路走不通；让视觉模型转述成文字是唯一稳的方案。
+
+## 命令
+
+| 命令 | 说明 |
+| --- | --- |
+| `/img_list` | 看本会话存了哪些图 |
+| `/img_show 12` | 把 #12 重新发出来 |
+| `/img_clean` | 清理超过保留天数的图 |
+
+## 配置
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `enabled` | true | 总开关 |
+| `keep_current_image` | false | 当前消息的图是否直接带给聊天模型（需要模型支持视觉） |
+| `vision_provider` | 空 | 看图用的视觉模型，空=用 `provider_settings.default_image_caption_provider_id` |
+| `vision_max_side` | 768 | 传给视觉模型的图片长边 |
+| `vision_prompt` | 空 | 自定义看图指令 |
+| `cache_caption` | true | 缓存看图结果 |
+| `llm_max_side` | 512 | 直接注入时的图长边 |
+| `max_images_per_request` | 2 | 单次请求最多注入几张 |
+| `max_images_per_message` | 3 | 一条消息最多处理几张 |
+| `retention_days` | 7 | 保留天数，0=不删 |
+| `inject_hint` / `hint_items` | true / 5 | 是否把可用编号注入系统提示 |
+| `capture_hint_seconds` | 180 | 先发图再提问时，多久内自动补 `[图#N]` |
+| `allowed_sessions` / `blocked_sessions` | 空 | 生效范围 |
+
+## 注意
+
+- 图片落盘后用的是**本地路径**，删掉 `plugin_data/astrbot_plugin_lazy_image/` 就全没了
+- 只影响上下文，不影响绘图插件：`edit_image` / `describe_image_as_prompt` 仍然直接从消息里取图
+- 看图走视觉模型，deepseek-flash 是推理模型，单次 10~25 秒；缓存命中后是秒回
