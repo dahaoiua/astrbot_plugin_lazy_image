@@ -23,6 +23,7 @@ from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Image
+import mcp.types as mcp_types
 from astrbot.api.star import Context, Star, register
 from astrbot.core.utils.astrbot_path import get_astrbot_plugin_data_path
 
@@ -387,6 +388,17 @@ class LazyImagePlugin(Star):
             self._last_capture[umo] = (int(items[-1]["id"]), time.time())
 
     # ------------------------------------------------------------ 工具：按需看图
+    def _chat_supports_image(self, event: AstrMessageEvent) -> bool:
+        """当前对话模型自己能不能看图（能的话直接把图塞回去，不用视觉模型转述）。"""
+        try:
+            prov = self.context.get_using_provider(umo=event.unified_msg_origin)
+        except Exception:
+            prov = None
+        if prov is None:
+            return False
+        mods = (getattr(prov, "provider_config", None) or {}).get("modalities") or []
+        return (not mods) or ("image" in mods)
+
     def _vision_provider(self, event: AstrMessageEvent):
         """看图用的视觉模型：插件配置 > provider_settings 的 caption provider > 当前对话模型。"""
         pid = self._str("vision_provider", "").strip()
@@ -438,15 +450,31 @@ class LazyImagePlugin(Star):
             target = items[-1]
 
         question = (question or "").strip()
-        cached = (target.get("caption") or "").strip()
-        if cached and not question:
-            return f"图#{target.get('id')}（{target.get('w')}x{target.get('h')}）的内容：{cached}"
+        path = self.store.llm_copy(umo, target, self._int("vision_max_side", 768))
+
+        # 聊天模型自己能看图时，直接把图塞回上下文（AstrBot 会缓存成 ImageContent 并追加到消息里）
+        if self._chat_supports_image(event):
+            try:
+                raw = Path(path).read_bytes()
+                mime = "image/jpeg" if str(path).lower().endswith(".jpg") else "image/png"
+                logger.info("[lazyimg] 直接附图 #%s（%s，%s B）", target.get("id"), mime, len(raw))
+                return mcp_types.CallToolResult(content=[
+                    mcp_types.TextContent(
+                        type="text",
+                        text=f"图#{target.get('id')}（{target.get('w')}x{target.get('h')}）已附上，直接看图回答；不要重复调用。",
+                    ),
+                    mcp_types.ImageContent(
+                        type="image",
+                        data=base64.b64encode(raw).decode("ascii"),
+                        mimeType=mime,
+                    ),
+                ])
+            except Exception as exc:  # pragma: no cover
+                logger.warning("[lazyimg] 附图失败，改走视觉模型：%s", exc)
 
         prov = self._vision_provider(event)
         if prov is None:
             return "看图失败：没有可用的视觉模型（检查 provider_settings.default_image_caption_provider_id 或插件配置 vision_provider）。"
-
-        path = self.store.llm_copy(umo, target, self._int("vision_max_side", 768))
         base_prompt = self._str(
             "vision_prompt",
             "仔细看这张图，用中文回答：画面主体是什么、场景在哪、有什么文字（原样写出）、主色调和构图。只描述看得到的内容，不要猜。",
@@ -472,9 +500,6 @@ class LazyImagePlugin(Star):
         if not text:
             return "看图失败：视觉模型没返回内容（可能是推理 token 用超了，稍后再试）。"
 
-        if not question and self._bool("cache_caption", True):
-            target["caption"] = text[:1000]
-            self.store.save(umo, index)
         logger.info("[lazyimg] 看图 #%s：%s", target.get("id"), text[:60].replace("\n", " "))
         return f"图#{target.get('id')}（{target.get('w')}x{target.get('h')}）的内容：\n{text}"
 
