@@ -12,7 +12,7 @@ AstrBot 默认会把图片以 base64 放进上下文，**每轮请求都重发�
 | --- | --- | --- |
 | 普通聊天（历史 10 张图） | 1.6MB 上传 + 1.5 万 token | ~0 + 纯文本 |
 | 发图问一句 | 同上 | 35KB 缩略图，模型直接看 |
-| 需要知道图里内容 | 已经在上下文里了 | 一次 `view_image`（视觉模型调用，结果缓存） |
+| 需要看旧图 | 已经在上下文里了 | 一次 `view_image`（模型直接看原图） |
 
 ## 工作方式
 
@@ -21,10 +21,11 @@ AstrBot 默认会把图片以 base64 放进上下文，**每轮请求都重发�
   → 插件落盘 plugin_data/astrbot_plugin_lazy_image/<会话>/12.png
   → 上下文里的图片块换成 [图片]，消息末尾补 "[图#12]"
 
-模型需要知道图里是什么
-  → 调 view_image(12)（可带 question）
-  → 插件把图缩到 768 长边，交给视觉模型（默认 deepseek/deepseek-flash）
-  → 视觉模型返回文字描述，结果缓存进索引，重复问不再调模型
+模型需要看旧图
+  → 调 view_image(12)
+  → 聊天模型自己支持视觉时：插件把原图（768 长边）作为 ImageContent 返回，
+    AstrBot 会把它追加到上下文，模型**直接看到图**
+  → 聊天模型不支持视觉时：退回让视觉模型描述成文字
 ```
 
 为什么历史图要走视觉模型：AstrBot 的 `on_llm_request` 只在对话开始时执行一次，
@@ -48,7 +49,6 @@ AstrBot 默认会把图片以 base64 放进上下文，**每轮请求都重发�
 | `vision_provider` | 空 | 看图用的视觉模型，空=用 `provider_settings.default_image_caption_provider_id` |
 | `vision_max_side` | 768 | 传给视觉模型的图片长边 |
 | `vision_prompt` | 空 | 自定义看图指令 |
-| `cache_caption` | true | 缓存看图结果 |
 | `llm_max_side` | 512 | 直接注入时的图长边 |
 | `max_images_per_request` | 2 | 单次请求最多注入几张 |
 | `max_images_per_message` | 3 | 一条消息最多处理几张 |
@@ -61,4 +61,4 @@ AstrBot 默认会把图片以 base64 放进上下文，**每轮请求都重发�
 
 - 图片落盘后用的是**本地路径**，删掉 `plugin_data/astrbot_plugin_lazy_image/` 就全没了
 - 只影响上下文，不影响绘图插件：`edit_image` / `describe_image_as_prompt` 仍然直接从消息里取图
-- 看图走视觉模型，deepseek-flash 是推理模型，单次 10~25 秒；缓存命中后是秒回
+- 对话模型支持视觉时，`view_image` 直接把原图塞回上下文，不存在"缓存文字"这回事
