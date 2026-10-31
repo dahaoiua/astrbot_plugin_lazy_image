@@ -29,12 +29,6 @@
     "type": "text",
     "default": ""
   },
-  "cache_caption": {
-    "description": "缓存看图结果",
-    "hint": "第一次看完把描述存进索引，下次同样问题直接返回，省一次模型调用",
-    "type": "bool",
-    "default": true
-  },
   "llm_max_side": {
     "description": "给模型看的图片长边",
     "hint": "缩到这个尺寸再送给 LLM，512 足够辨认内容，1024 更清楚但 token/流量翻好几倍",
