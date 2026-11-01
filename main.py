@@ -34,6 +34,14 @@ except Exception:  # pragma: no cover
 
 PLUGIN_NAME = "astrbot_plugin_lazy_image"
 
+
+def _sender_of(event) -> str:
+    """取发送者 ID，拿不到就空串。"""
+    try:
+        return str(event.get_sender_id() or "")
+    except Exception:
+        return ""
+
 INJECT_HINT = "【会话图片】最近可用编号：{ids}。最新那张是 #{latest}（用户说「这张图/刚才那张」默认指它）。只有需要辨认图里的细节/文字/颜色时才调 view_image(image_id) 取原图。"
 
 
@@ -81,7 +89,8 @@ class ImageStore:
                 return item
         return None
 
-    def add(self, umo: str, data: bytes, ext: str, sha: str, size: tuple[int, int]) -> dict:
+    def add(self, umo: str, data: bytes, ext: str, sha: str, size: tuple[int, int],
+            src: str = "user", uid: str = "") -> dict:
         index = self.load(umo)
         new_id = int(index.get("last_id", 0)) + 1
         index["last_id"] = new_id
@@ -95,6 +104,8 @@ class ImageStore:
             "w": size[0],
             "h": size[1],
             "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "src": src,
+            "uid": str(uid or ""),
         }
         index.setdefault("items", []).append(item)
         self.save(umo, index)
@@ -253,25 +264,25 @@ class LazyImagePlugin(Star):
         except Exception:
             return (0, 0)
 
-    def _register(self, umo: str, refs: list[str]) -> list[dict]:
-        """把当前消息里的图落盘编号，返回已登记的条目。"""
+    def _register(self, umo: str, refs: list[str], uid: str = "") -> list[dict]:
+        """把当前消息里的图落盘编号（记下是谁发的），返回已登记的条目。"""
         limit = self._int("max_images_per_message", 3)
         registered: list[dict] = []
-        index = None
         for ref in refs[: max(1, limit)]:
             data, ext = self._read_ref(ref)
             if not data:
                 continue
             sha = hashlib.sha256(data).hexdigest()
-            index = index or self.store.load(umo)
+            index = self.store.load(umo)
             hit = self.store.find_by_sha(index, sha)
             if hit:
                 registered.append(hit)
                 continue
-            item = self.store.add(umo, data, ext, sha, self._probe_size(data))
-            index["items"].append(item) if index is not None else None
+            item = self.store.add(umo, data, ext, sha, self._probe_size(data),
+                                  src="user", uid=str(uid or ""))
             registered.append(item)
-            logger.info("[lazyimg] 图片落盘 %s #%s %sx%s", umo, item["id"], item["w"], item["h"])
+            logger.info("[lazyimg] 图片落盘 %s #%s %sx%s by %s",
+                        umo, item["id"], item["w"], item["h"], uid or "?")
         return registered
 
     @staticmethod
@@ -307,8 +318,12 @@ class LazyImagePlugin(Star):
     def _pop_pending(self, umo: str) -> list[str]:
         return self._pending.pop(umo, [])
 
-    def _recent_items(self, umo: str, limit: int = 5) -> list[dict]:
+    def _recent_items(self, umo: str, limit: int = 5, uid: str = "") -> list[dict]:
         items = self.store.load(umo).get("items", [])
+        if uid:
+            mine = [it for it in items if str(it.get("uid") or "") == uid]
+            if mine:
+                items = mine
         return items[-limit:] if limit > 0 else []
 
     # ------------------------------------------------------------ LLM 请求钩子
@@ -322,7 +337,7 @@ class LazyImagePlugin(Star):
 
         # 1) 当前消息里的图：落盘编号，然后从请求里摘掉
         current_refs = list(getattr(req, "image_urls", None) or [])
-        new_items = self._register(umo, current_refs) if current_refs else []
+        new_items = self._register(umo, current_refs, _sender_of(event)) if current_refs else []
         prompt = getattr(req, "prompt", "") or ""
         if new_items:
             tags = " ".join(f"[图#{it['id']}]" for it in new_items)
@@ -355,7 +370,7 @@ class LazyImagePlugin(Star):
 
         # 4) 告诉模型有哪些图可以申请
         if self._bool("inject_hint", True):
-            recent = self._recent_items(umo, self._int("hint_items", 5))
+            recent = self._recent_items(umo, self._int("hint_items", 5), _sender_of(event))
             if recent:
                 ids = "、".join(f"#{it['id']}({it['w']}x{it['h']})" for it in recent)
                 hint = INJECT_HINT.format(ids=ids, latest=recent[-1]["id"])
@@ -383,7 +398,7 @@ class LazyImagePlugin(Star):
                     logger.debug("[lazyimg] 消息图片取不到", exc_info=True)
         if not refs:
             return
-        items = self._register(umo, refs)
+        items = self._register(umo, refs, _sender_of(event))
         if items:
             self._last_capture[umo] = (int(items[-1]["id"]), time.time())
 
@@ -447,7 +462,9 @@ class LazyImagePlugin(Star):
             if target is None:
                 return f"没有编号 {image_id} 的图片。可用：{', '.join('#'+str(it['id']) for it in items[-5:])}"
         else:
-            target = items[-1]
+            uid = _sender_of(event)
+            mine = [it for it in items if uid and str(it.get("uid") or "") == uid]
+            target = mine[-1] if mine else items[-1]
 
         question = (question or "").strip()
         path = self.store.llm_copy(umo, target, self._int("vision_max_side", 768))
