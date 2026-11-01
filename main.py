@@ -393,9 +393,23 @@ class LazyImagePlugin(Star):
         for comp in getattr(message_obj, "message", []) or []:
             if isinstance(comp, Image):
                 try:
-                    refs.append(await comp.convert_to_file_path())
+                    picked = await comp.convert_to_file_path()
                 except Exception:  # pragma: no cover - 图片过期/下载失败
                     logger.debug("[lazyimg] 消息图片取不到", exc_info=True)
+                    continue
+                # QQ 有时只给压缩过的副本；同一条消息若还带着更大的本地原图，用大的那个
+                best = Path(picked)
+                for cand in (getattr(comp, "file", None), getattr(comp, "path", None)):
+                    if not isinstance(cand, str) or not cand:
+                        continue
+                    cpath = cand[7:] if cand.startswith("file://") else cand
+                    try:
+                        cfile = Path(cpath)
+                        if cfile.is_file() and cfile.stat().st_size > best.stat().st_size:
+                            best = cfile
+                    except OSError:
+                        continue
+                refs.append(str(best))
         if not refs:
             return
         items = self._register(umo, refs, _sender_of(event))
