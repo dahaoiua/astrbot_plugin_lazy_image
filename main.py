@@ -34,7 +34,7 @@ except Exception:  # pragma: no cover
 
 PLUGIN_NAME = "astrbot_plugin_lazy_image"
 
-INJECT_HINT = "【会话图片】最近可用编号：{ids}。只有需要辨认图里的细节/文字/颜色时，才调 view_image(image_id) 取原图；只提到「那张图」而不用细节时不要调。"
+INJECT_HINT = "【会话图片】最近可用编号：{ids}。最新那张是 #{latest}（用户说「这张图/刚才那张」默认指它）。只有需要辨认图里的细节/文字/颜色时才调 view_image(image_id) 取原图。"
 
 
 class ImageStore:
@@ -358,7 +358,7 @@ class LazyImagePlugin(Star):
             recent = self._recent_items(umo, self._int("hint_items", 5))
             if recent:
                 ids = "、".join(f"#{it['id']}({it['w']}x{it['h']})" for it in recent)
-                hint = INJECT_HINT.format(ids=ids)
+                hint = INJECT_HINT.format(ids=ids, latest=recent[-1]["id"])
                 req.system_prompt = ((getattr(req, "system_prompt", "") or "") + "\n\n" + hint).strip()
 
     # ------------------------------------------------------------ 消息级落盘
