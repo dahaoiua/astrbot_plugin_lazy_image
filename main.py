@@ -392,29 +392,61 @@ class LazyImagePlugin(Star):
         refs: list[str] = []
         for comp in getattr(message_obj, "message", []) or []:
             if isinstance(comp, Image):
-                try:
-                    picked = await comp.convert_to_file_path()
-                except Exception:  # pragma: no cover - 图片过期/下载失败
-                    logger.debug("[lazyimg] 消息图片取不到", exc_info=True)
-                    continue
-                # QQ 有时只给压缩过的副本；同一条消息若还带着更大的本地原图，用大的那个
-                best = Path(picked)
-                for cand in (getattr(comp, "file", None), getattr(comp, "path", None)):
-                    if not isinstance(cand, str) or not cand:
-                        continue
-                    cpath = cand[7:] if cand.startswith("file://") else cand
-                    try:
-                        cfile = Path(cpath)
-                        if cfile.is_file() and cfile.stat().st_size > best.stat().st_size:
-                            best = cfile
-                    except OSError:
-                        continue
-                refs.append(str(best))
+                picked = await self._best_image_source(comp)
+                if picked:
+                    refs.append(picked)
         if not refs:
             return
         items = self._register(umo, refs, _sender_of(event))
         if items:
             self._last_capture[umo] = (int(items[-1]["id"]), time.time())
+
+    async def _best_image_source(self, comp) -> str:
+        """同一条消息可能有多份图（QQ 压缩副本 / 本地原图 / 原始 URL），挑像素最多的那份。"""
+        candidates: list[Path] = []
+        try:
+            candidates.append(Path(await comp.convert_to_file_path()))
+        except Exception:  # pragma: no cover - 图片过期/下载失败
+            logger.debug("[lazyimg] convert_to_file_path 失败", exc_info=True)
+        for cand in (getattr(comp, "file", None), getattr(comp, "path", None)):
+            if not isinstance(cand, str) or not cand:
+                continue
+            cpath = cand[7:] if cand.startswith("file://") else cand
+            p = Path(cpath)
+            try:
+                if p.is_file():
+                    candidates.append(p)
+            except OSError:
+                continue
+        url = getattr(comp, "url", "") or ""
+        if url.startswith(("http://", "https://")):
+            try:
+                with urllib.request.urlopen(url, timeout=30) as resp:
+                    data = resp.read()
+                suffix = ".png" if data[:8].startswith(b"\x89PNG") else ".jpg"
+                tmp = self.store.base / f"src_{int(time.time() * 1000)}{suffix}"
+                tmp.write_bytes(data)
+                candidates.append(tmp)
+            except Exception:
+                logger.debug("[lazyimg] 下载原始图失败", exc_info=True)
+
+        if not candidates:
+            return ""
+
+        def pixels(p: Path) -> int:
+            try:
+                with PILImage.open(p) as img:
+                    return img.size[0] * img.size[1]
+            except Exception:
+                try:
+                    return p.stat().st_size
+                except OSError:
+                    return 0
+
+        best = max(candidates, key=pixels)
+        logger.info("[lazyimg] 选图 %s (%d 候选, 最佳 %d 像素)",
+                    best.name, len(candidates), pixels(best))
+        return str(best)
 
     # ------------------------------------------------------------ 工具：按需看图
     def _chat_supports_image(self, event: AstrMessageEvent) -> bool:
