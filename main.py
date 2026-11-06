@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -190,6 +191,8 @@ class LazyImagePlugin(Star):
         self._last_cleanup = 0.0
         # umo -> (最近落盘的 id, 时间戳)，用来在下一轮把 [图#N] 补进消息里
         self._last_capture: dict[str, tuple[int, float]] = {}
+        # 消息级已经按原图存过的会话 + 时间，避免 LLM 阶段再存一份压缩副本
+        self._captured_at: dict[str, float] = {}
 
     # ------------------------------------------------------------ 配置读取
     def _bool(self, key: str, default: bool) -> bool:
@@ -337,6 +340,10 @@ class LazyImagePlugin(Star):
 
         # 1) 当前消息里的图：落盘编号，然后从请求里摘掉
         current_refs = list(getattr(req, "image_urls", None) or [])
+        if current_refs and (time.time() - self._captured_at.get(umo, 0)) < 120:
+            # 消息阶段已经按原图存过了；这里拿到的是给 LLM 的压缩副本，丢掉
+            logger.debug("[lazyimg] 跳过压缩副本（本消息已按原图存过）")
+            current_refs = []
         new_items = self._register(umo, current_refs, _sender_of(event)) if current_refs else []
         prompt = getattr(req, "prompt", "") or ""
         if new_items:
@@ -395,11 +402,54 @@ class LazyImagePlugin(Star):
                 picked = await self._best_image_source(comp)
                 if picked:
                     refs.append(picked)
+        # 引用消息里的图也要收：AstrBot 给 LLM 的那份是压缩过的，这里按原始 ref 拿
+        try:
+            from astrbot.core.utils.quoted_message_parser import (
+                extract_quoted_message_images,
+            )
+
+            for ref in await extract_quoted_message_images(event) or []:
+                picked = self._source_from_ref(ref)
+                if picked:
+                    refs.append(picked)
+        except Exception:
+            logger.debug("[lazyimg] 引用图片解析失败", exc_info=True)
         if not refs:
             return
         items = self._register(umo, refs, _sender_of(event))
         if items:
             self._last_capture[umo] = (int(items[-1]["id"]), time.time())
+            self._captured_at[umo] = time.time()
+
+    def _source_from_ref(self, ref: str) -> str:
+        """把 http / data: / file:// / 本地路径统一成可读的本地文件（尽量拿原图）。"""
+        ref = (ref or "").strip()
+        if not ref:
+            return ""
+        if ref.startswith("data:image"):
+            try:
+                head, _, payload = ref.partition(",")
+                suffix = ".png" if "png" in head else ".jpg"
+                tmp = self.store.base / f"src_{int(time.time() * 1000)}_{len(payload) % 1000}{suffix}"
+                tmp.write_bytes(base64.b64decode(payload))
+                return str(tmp)
+            except Exception:
+                return ""
+        if ref.startswith(("http://", "https://")):
+            try:
+                with urllib.request.urlopen(ref, timeout=30) as resp:
+                    data = resp.read()
+                suffix = ".png" if data[:8].startswith(b"\x89PNG") else ".jpg"
+                tmp = self.store.base / f"src_{int(time.time() * 1000)}_{len(data) % 1000}{suffix}"
+                tmp.write_bytes(data)
+                return str(tmp)
+            except Exception:
+                logger.debug("[lazyimg] 下载引用图失败", exc_info=True)
+                return ""
+        try:
+            return ref
+        except Exception:
+            return ""
 
     async def _best_image_source(self, comp) -> str:
         """同一条消息可能有多份图（QQ 压缩副本 / 本地原图 / 原始 URL），挑像素最多的那份。"""
@@ -611,8 +661,72 @@ class LazyImagePlugin(Star):
         yield event.plain_result(f"已清理 {removed} 张过期的图。")
         event.stop_event()
 
+    # ------------------------------------------------------------ 自动清理
+    async def initialize(self) -> None:
+        """起一个后台任务，按间隔自动清过期图 + 下载残留。"""
+        try:
+            self._cleanup_task = asyncio.create_task(self._auto_cleanup())
+            logger.info("[lazyimg] 自动清理已启动（每 %s 小时，保留 %s 天）",
+                        self._int("cleanup_interval_hours", 6),
+                        self._int("retention_days", 7))
+        except Exception:
+            logger.debug("[lazyimg] 启动自动清理失败", exc_info=True)
+
+    async def _auto_cleanup(self) -> None:
+        while True:
+            try:
+                removed = self.store.cleanup(self._int("retention_days", 7))
+                strays = self._sweep_stray_sources()
+                if removed or strays:
+                    logger.info("[lazyimg] 自动清理：删 %s 张过期图、%s 个临时下载", removed, strays)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("[lazyimg] 自动清理异常", exc_info=True)
+            await asyncio.sleep(max(600, self._int("cleanup_interval_hours", 6) * 3600))
+
+    def _sweep_temp_media(self) -> int:
+        """可选：清 AstrBot data/temp 里旧的 media_image_*（默认关，clean_temp_days=0）。"""
+        days = self._int("clean_temp_days", 0)
+        if days <= 0:
+            return 0
+        cutoff = time.time() - days * 86400
+        removed = 0
+        temp_dir = Path(get_astrbot_plugin_data_path()).parent / "temp"
+        if not temp_dir.is_dir():
+            return 0
+        for pat in ("media_image_*", "compressed_*"):
+            for p in temp_dir.glob(pat):
+                try:
+                    if p.is_file() and p.stat().st_mtime < cutoff:
+                        p.unlink()
+                        removed += 1
+                except OSError:
+                    pass
+        return removed
+
+    def _sweep_stray_sources(self) -> int:
+        """清掉 _best_image_source 下载的 src_* 临时文件（超过 10 分钟的）。"""
+        removed = 0
+        cutoff = time.time() - 600
+        try:
+            for p in self.store.base.glob("src_*"):
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        p.unlink()
+                        removed += 1
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        return removed
+
     async def terminate(self) -> None:
+        task = getattr(self, "_cleanup_task", None)
+        if task is not None:
+            task.cancel()
         try:
             self.store.cleanup(self._int("retention_days", 7))
+            self._sweep_stray_sources()
         except Exception:
             logger.debug("[lazyimg] 退出清理失败", exc_info=True)
